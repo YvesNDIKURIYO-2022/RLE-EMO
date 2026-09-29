@@ -1,6 +1,6 @@
 # RLE-EMO
 
-**A PPO-Guided Evolutionary Framework with Region-Based Diversity and Coordinate-Descent Local Search for Multi-Objective Global Optimization**
+**A Region-Based LHS-Guided Evolutionary Algorithm for Multi-Objective Optimization**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
@@ -13,19 +13,21 @@ RLE-EMO is a multi-objective global optimizer designed for non-convex, multi-ext
 
 The framework integrates three mechanisms:
 
-1. **PPO-Guided Ensemble Initialization.** A Proximal Policy Optimization (PPO) sampling operator is combined with heuristic, random, and opposite-bias sampling to construct the initial population. The operator is trained once by warm-starting on a pool of five problems (ZDT1, ZDT2, and ZDT3 with 10 variables; DTLZ2 with 3 objectives and 7 variables; WFG1 with 3 objectives and 6 variables), using the Pareto sets supplied by pymoo as demonstration trajectories. It is then frozen and reused unchanged across all subsequent problems, so its cost is amortized and does not affect the per-instance online budget.
+1. **LHS-Guided Ensemble Initialization.** A Latin hypercube sampling (LHS) operator is combined with heuristic, random, and opposite-bias sampling to construct the initial population. The initialization is deterministic given a run seed, requires no offline training, and incurs no amortized cost and no distribution-shift risk across instances. The LHS component uses SciPy's `LatinHypercube` sampler.
 
 2. **Region-Based Diversity with Dual Reset Triggers.** Promising non-dominated solutions are archived and re-injected when the population converges prematurely. Two triggers are employed—a diversity trigger and a rate-change trigger—each rate-limited to a minimum interval of 10 generations.
 
-3. **Coordinate-Descent Local Search.** Periodic 2-opt refinement is applied to the top 10% of solutions every five, ten, or fifteen generations, depending on instance size.
+3. **Coordinate-Descent Local Search.** Periodic coordinate-descent refinement is applied to the top 10% of solutions every five, ten, or fifteen generations, depending on instance size.
 
-The framework is accompanied by three analytical results: almost-sure convergence to the Pareto front, a Lipschitz stability result for the adaptive operator rates, and a conditional sample-complexity bound. The stability result applies to any adaptive scheme whose operator rates depend on the same two-state feedback, not only to RLE-EMO.
+The framework is accompanied by two analytical results: almost-sure convergence to the Pareto front (Theorem 1) and an exponential stability condition for the adaptive operator rates (Theorem 2) that accounts explicitly for the dependence of the rates on the generation index and is conditional on the population state converging. The stability result applies to any adaptive scheme whose operator rates depend on the same two-state feedback, not only to RLE-EMO.
+
+The paper also provides a **three-step practitioner diagnostic**—the reference-vector approximation condition—that characterizes the problem class on which RLE-EMO is the appropriate choice and predicts the empirical outcome on every instance in the benchmark set.
 
 ---
 
 ## Benchmark Evaluation
 
-The framework is evaluated on eleven instances drawn from four established test suites:
+The framework is evaluated on eleven instances drawn from four established test suites, with **thirty independent runs per instance**:
 
 | Suite | Instances | Variables | Objectives | Front Characteristics |
 |---|---|---|---|---|
@@ -34,7 +36,18 @@ The framework is evaluated on eleven instances drawn from four established test 
 | WFG | WFG1, WFG4, WFG9 | 10 | 3 | mixed, multi-modal, deceptive |
 | DASCMOP | DASCMOP1, DASCMOP7 | 30 | 2, 3 | constrained |
 
-RLE-EMO attains the highest hypervolume on six of the eleven instances and is the only method among six compared that produces a non-zero hypervolume on all thirty runs of DASCMOP7 (Cohen's *d* = 28.01). It also records wins on all three ZDT instances (+17.6%, +42.0%, and +14.0%), on WFG1 (+18.4%), and on DASCMOP1 (+34.2%). The method is outperformed on three instances whose Pareto fronts violate a uniformity condition on the region-based diversity operator (DTLZ6, DTLZ7, and WFG9); the violation is detectable from a pilot sample of the front before any run is performed, yielding an actionable selection criterion for practitioners.
+RLE-EMO is compared against three canonical MOEAs—NSGA-II, MOEA/D, and RVEA—representing the three principal MOEA design paradigms. RLE-EMO attains the highest hypervolume on **eight of the eleven instances**:
+
+- **ZDT1**: +23.2% over NSGA-II (Cohen's *d* = +4.08)
+- **ZDT2**: +80.4% over NSGA-II (Cohen's *d* = +0.92)
+- **ZDT3**: +4.1% over NSGA-II (Cohen's *d* = +2.46)
+- **DTLZ6**: +32.6% over RVEA (Cohen's *d* = +4.45)
+- **DTLZ7**: +12.1% over NSGA-II (Cohen's *d* = +2.83)
+- **WFG1**: +56.0% over NSGA-II (Cohen's *d* = +3.89)
+- **DASCMOP1**: +18.7% over NSGA-II (Cohen's *d* = +2.09)
+- **DASCMOP7**: only algorithm with non-zero HV across all 30 runs (HV = 0.0116 ± 0.0007; Cohen's *d* = +22.07 against both NSGA-II and RVEA, which return exactly zero on every run)
+
+The method is outperformed on three instances whose Pareto fronts violate the reference-vector approximation condition: **DTLZ2** (−4.0%, RVEA best), **WFG4** (−16.4%, RVEA best), and **WFG9** (−9.7%, NSGA-II best). The diagnostic identifies the correct alternative in each case before any algorithm is run.
 
 ---
 
@@ -46,13 +59,14 @@ The repository contains two self-contained scripts:
 RLE-EMO/
 │
 ├── rle_emo_benchmark.py           Full benchmark suite
-│                                  (six algorithms × eleven instances × 30 runs)
+│                                  (four algorithms × eleven instances × 30 runs)
 ├── rle_emo_ablation.py            Independent ablation study
 │                                  (six RLE-EMO variants × eleven instances × 30 runs)
 ├── requirements.txt               Python dependencies
 │
 ├── results/                       Benchmark outputs (generated by rle_emo_benchmark.py)
 │   ├── results_YYYYMMDD_HHMMSS.json
+│   ├── results_YYYYMMDD_HHMMSS.csv
 │   ├── summary_table.txt
 │   ├── statistics_table.txt
 │   ├── pareto_fronts/             2D and 3D Pareto front plots (PNG 300 dpi + PDF)
@@ -96,19 +110,25 @@ matplotlib
 pymoo
 ```
 
+Optional packages (for Nemenyi post-hoc test and CSV export):
+
+```bash
+pip install scikit-posthocs pandas
+```
+
 ---
 
 ## Usage
 
 ### Script 1 — `rle_emo_benchmark.py` (Full Benchmark)
 
-Runs all eleven benchmark instances with thirty independent runs per instance, for each of the six compared algorithms (RLE-EMO, RL-MOEA, QL-MOEA, QLMOEA/D-AOS, RL-NSGA-II, and R2-RLMOEA), and writes the results to the output directory.
+Runs all eleven benchmark instances with thirty independent runs per instance, for each of the four compared algorithms (RLE-EMO, NSGA-II, MOEA/D, and RVEA), and writes the results to the output directory.
 
 ```bash
 python rle_emo_benchmark.py
 ```
 
-By default, the output directory is the path set by `OUTPUT_BASE_DIR` at the top of the script; override it with `--output`, and control the number of runs with `--runs`:
+By default, the output directory is the path set by `DEFAULT_OUTPUT_DIR` at the top of the script; override it with `--output`, and control the number of runs with `--runs`:
 
 ```bash
 python rle_emo_benchmark.py --output ./results --runs 30
@@ -116,25 +136,35 @@ python rle_emo_benchmark.py --output ./results --runs 30
 
 > **Note:** The default output path is configured for the authors' local environment. Pass `--output ./results` to write to a relative directory.
 
-**Outputs produced:** `results/results_YYYYMMDD_HHMMSS.json`, `summary_table.txt`, `statistics_table.txt`, `pareto_fronts/`, `convergence/`, `statistics/`, `heatmap.png`, and `heatmap.pdf`.
+**Outputs produced:** `results/results_YYYYMMDD_HHMMSS.json`, `results_YYYYMMDD_HHMMSS.csv`, `summary_table.txt`, `statistics_table.txt`, `pareto_fronts/`, `convergence/`, `statistics/`, `heatmap.png`, and `heatmap.pdf`.
 
 ---
 
 ### Script 2 — `rle_emo_ablation.py` (Independent Ablation Study)
 
-A self-contained ablation study that evaluates six RLE-EMO variants across the eleven benchmark instances with thirty independent runs per (problem, variant) pair, for a total of **1,980 runs**. It is intended to be run as a single Jupyter cell or as a standalone Python script.
+A self-contained ablation study that evaluates six RLE-EMO variants across the eleven benchmark instances with thirty independent runs per (problem, variant) pair, for a total of **1,980 runs**. It is intended to be run as a standalone Python script.
 
 ```bash
 python rle_emo_ablation.py
 ```
 
-To smoke-test the ablation with fewer runs, change `NUM_RUNS = 30` to `NUM_RUNS = 3` at the top of the script.
+To smoke-test the ablation with fewer runs:
+
+```bash
+python rle_emo_ablation.py --runs 3
+```
+
+To restrict to a subset of problems:
+
+```bash
+python rle_emo_ablation.py --problems zdt1,dtlz6
+```
 
 **Outputs produced (in `ablation_output/`):** `ablation_summary.txt`, `ablation_heatmap.png`, `ablation_heatmap.pdf`, and `ablation_results.json`.
 
-> **Runtime note.** With `NUM_RUNS = 30` and all eleven problems, the standalone ablation requires approximately 32 hours of wall-clock time on an Intel Core i5-1340P workstation (~1,930 minutes in the reference execution). For exploratory use, reduce `NUM_RUNS` or restrict the `PROBLEMS` list.
+> **Runtime note.** With 30 runs and all eleven problems, the standalone ablation requires approximately 32 hours of wall-clock time on an Intel Core i5-1340P workstation (~1,900 minutes in the reference execution). For exploratory use, reduce `--runs` or restrict the `--problems` list.
 
-> **Note on PDF export.** The ablation script attempts to save the heatmap in both PNG (300 dpi) and PDF (vector) formats. On some Matplotlib installations the PDF backend is not bundled, which raises `ModuleNotFoundError: No module named 'matplotlib.backends.backend_pdf'`. If this occurs, the PNG output is still written correctly; install the PDF backend (e.g., `pip install matplotlib[pdf]`) and re-run the plotting routine, or simply comment out the `plt.savefig(path_pdf, ...)` line.
+> **Note on PDF export.** The ablation script attempts to save the heatmap in both PNG (300 dpi) and PDF (vector) formats. On some Matplotlib installations the PDF backend is not bundled, which raises `ModuleNotFoundError: No module named 'matplotlib.backends.backend_pdf'`. If this occurs, the PNG output is still written correctly; install the PDF backend (e.g., `pip install matplotlib[pdf]`) and re-run the plotting routine, or simply comment out the PDF save line.
 
 ---
 
@@ -147,8 +177,8 @@ The ablation study isolates the contribution of each algorithmic component by di
 | `full` | All components active (baseline) |
 | `no_archive_return` | Archive-union step removed from the final Pareto set |
 | `no_region_select` | Region-based selection replaced by crowding-distance selection |
-| `no_ppo_control` | PPO action replaced by uniform random sampling during initialization |
-| `no_local_search` | Periodic 2-opt refinement disabled |
+| `no_lhs_control` | LHS subpopulation replaced by uniform random sampling |
+| `no_local_search` | Periodic coordinate-descent refinement disabled |
 | `no_reset` | Both population-reset triggers disabled |
 
 ### Ablation Results
@@ -157,39 +187,57 @@ Representative mean hypervolume results (30 runs per cell) from `ablation_output
 
 | Problem | Best Variant | HV (mean ± std) | Full HV (mean ± std) |
 |---|---|---|---|
-| ZDT1 | `no_region_select` | 0.8400 ± 0.0218 | 0.8289 ± 0.0166 |
-| ZDT2 | `no_reset` | 0.3499 ± 0.1116 | 0.2474 ± 0.0968 |
-| ZDT3 | `no_reset` | 1.2463 ± 0.0482 | 1.2143 ± 0.0703 |
-| DTLZ2 | `no_region_select` | 0.6769 ± 0.0089 | 0.5592 ± 0.0310 |
-| DTLZ6 | `no_region_select` | 0.3365 ± 0.0473 | 0.2936 ± 0.0449 |
-| DTLZ7 | (all tied at 0) | 0.0000 ± 0.0000 | 0.0000 ± 0.0000 |
-| WFG1 | `no_reset` | 27.4482 ± 7.1338 | 26.4785 ± 5.5023 |
-| WFG4 | `no_region_select` | 30.7326 ± 0.4497 | 24.1220 ± 1.7457 |
-| WFG9 | (all tied at 0) | 0.0000 ± 0.0000 | 0.0000 ± 0.0000 |
-| DASCMOP1 | `no_reset` | 0.1932 ± 0.0062 | 0.1903 ± 0.0065 |
-| DASCMOP7 | `no_region_select` | 0.6036 ± 0.0247 | 0.5688 ± 0.0250 |
+| ZDT1 | `no_region_select` | 0.8435 ± 0.0151 | 0.8256 ± 0.0228 |
+| ZDT2 | `no_reset` | 0.3596 ± 0.1321 | 0.2483 ± 0.1292 |
+| ZDT3 | `no_reset` | 0.9675 ± 0.0305 | 0.9380 ± 0.0390 |
+| DTLZ2 | `no_region_select` | 0.7078 ± 0.0100 | 0.5941 ± 0.0329 |
+| DTLZ6 | `no_region_select` | 91.9986 ± 6.3368 | 88.0836 ± 7.3936 |
+| DTLZ7 | `no_region_select` | 3.8133 ± 0.1149 | 3.6685 ± 0.0989 |
+| WFG1 | `no_reset` | 66.7930 ± 10.2776 | 65.1449 ± 7.9654 |
+| WFG4 | `no_region_select` | 30.7652 ± 0.6515 | 24.0627 ± 1.6008 |
+| WFG9 | `no_region_select` | 39.6569 ± 1.1924 | 34.2942 ± 3.0585 |
+| DASCMOP1 | `no_reset` | 0.1937 ± 0.0097 | 0.1892 ± 0.0075 |
+| DASCMOP7 | `no_region_select` | 0.0385 ± 0.0023 | 0.0353 ± 0.0020 |
+
+> **Note:** The ablation uses reference fronts built from the six variants, whereas the main benchmark uses reference fronts built from the four competing algorithms. Absolute HV values should not be compared across the two tables, but all qualitative claims hold within each table.
 
 ### Key Findings
 
-Four findings emerge from the ablation study:
+Five findings emerge from the ablation study:
 
-1. **Local search is the single most important component.** Removing it causes HV losses of 11.9%–43.9% on six instances (e.g., ZDT1: 0.7139 vs. 0.8289; DTLZ6: 0.1738 vs. 0.2936; DASCMOP1: 0.1624 vs. 0.1903).
+1. **Archive-return is the most uniformly important component.** Disabling it reduces the mean hypervolume on every one of the eleven instances, with losses ranging from 0.4% on DASCMOP1 to 40.3% on WFG4, and roughly halves cardinality on every instance.
 
-2. **Archive-return is the next most important.** Disabling it cuts HV by 3%–40% across most instances and roughly halves cardinality (e.g., WFG4: 14.4658 vs. 24.1220; DASCMOP7: 0.4891 vs. 0.5688).
+2. **Local search is the single most important component on the bi-objective and constrained instances.** Removing it causes HV losses of 13.0% on ZDT1, 44.0% on ZDT2, 9.5% on ZDT3, and 14.1% on DASCMOP1, while its contribution on three-objective instances is much smaller.
 
-3. **PPO control and reset are complementary and problem-dependent.** Removing PPO control is negligible on most instances but costs variance on ZDT2 and helps slightly on WFG1, while removing reset hurts sharply on DTLZ2 (−17.4%), DTLZ6 (−22.2%), and WFG4 (−19.8%) yet improves ZDT2, ZDT3, WFG1, and both DASCMOP instances.
+3. **Region-based selection is not universally beneficial.** Replacing it with crowding distance improves HV on eight of eleven instances, by up to +27.9% on WFG4 and +19.1% on DTLZ2. The improvements are largest on exactly the instances the diagnostic identifies as violating the reference-vector approximation condition.
 
-4. **Region-based selection is not always beneficial.** Replacing it with crowding distance improves HV on eight of eleven instances, by up to +27.4% on WFG4 and +21.1% on DTLZ2, directly corroborating the uniformity-assumption limitation. The instances where removing region-based selection helps are precisely the irregular-front instances (DTLZ6, DTLZ7, WFG9) and a subset of regular instances where crowding distance happens to align well with the front curvature.
+4. **Removing reset is problem-dependent.** Disabling both reset triggers improves HV on five instances (ZDT2, ZDT3, WFG1, DASCMOP1, DASCMOP7) and hurts on six, with the largest losses on DTLZ2 (−17.2%), WFG4 (−19.2%), and DTLZ6 (−10.9%).
 
-The component ranking is therefore **local search > archive-return > reset ≈ region selection ≈ PPO control**, with the latter three strongly problem-dependent.
+5. **LHS control contributes mainly to reproducibility.** Removing it changes the mean HV by less than 3% in nine of eleven cases, but the standard deviation of HV is consistently smaller with LHS control on ZDT3, DTLZ2, DTLZ6, DTLZ7, and DASCMOP7.
+
+The component ranking is therefore **archive-return > local search > reset ≈ region selection ≈ LHS control**, with the important qualification that local search dominates on bi-objective and constrained instances while archive-return dominates on multi-modal and deceptive three-objective instances.
+
+---
+
+## Practitioner Diagnostic
+
+The eight wins and three losses reduce to a single geometric property of the Pareto front: the **reference-vector approximation condition**. A three-step diagnostic allows a practitioner to predict, before running any algorithm, whether RLE-EMO will outperform a canonical baseline:
+
+1. **If $m = 2$ (bi-objective), choose RLE-EMO.** RLE-EMO wins all three ZDT instances and both DASCMOP instances.
+
+2. **If $m \geq 3$, determine whether the front is a smooth concave manifold.** Sample the front with a pilot run, partition into $N_{\max}$ regions using uniform weight vectors, and measure the fraction of empty regions. If the empty fraction exceeds 0.2, the front violates the condition and RLE-EMO is recommended. Otherwise, a reference-vector method such as RVEA is recommended.
+
+3. **If the front is believed to be deceptive, prefer NSGA-II.** Deception is a property of the decision space, not the objective space, and is not captured by the reference-vector approximation condition.
+
+The diagnostic predicts the empirical outcome correctly on all eleven instances in the benchmark set. We state it as an empirical observation rather than a theorem; it is a sufficient condition, not a necessary one.
 
 ---
 
 ## Reproducibility
 
-Each run uses a fixed seed (base seed 42, with run *r* seeded as 42 + *r*), applied identically across all algorithms to enable paired comparisons. Two independent 30-run executions of the full benchmark suite produced identical algorithm rankings with mean-hypervolume differences below 0.5%.
+Each run uses a fixed seed (base seed 42, with run *r* seeded as 42 + *r*), applied identically across all algorithms to enable paired comparisons. The initialization is deterministic given the run seed, and no training is performed, so there is no amortized offline cost and no distribution-shift risk.
 
-Both scripts use pymoo for problem definitions, hypervolume and IGD computation, and non-dominated sorting, so the metric definitions match the published conventions exactly. The reference point is set to 1.1 × max(PF_true) per objective, and degenerate objective values (|f_i| > 10^8) are excluded from all metric computations, uniformly across algorithms, to prevent pathological values from contaminating the rankings.
+Both scripts use pymoo for problem definitions, hypervolume and IGD computation, and non-dominated sorting, so the metric definitions match the published conventions exactly. The reference point is set to 1.1 × max(reference front) per objective, and degenerate objective values (|f_i| > 10^8) are excluded from all metric computations, uniformly across algorithms, to prevent pathological values from contaminating the rankings. A bounding-box filter is applied before metric computation: any solution exceeding 1.2 × the reference-front maximum, or falling below the reference-front minimum minus 0.5, is discarded. The reference front is analytic when reliable (ZDT1–ZDT3, DTLZ2, WFG4, DASCMOP1, DASCMOP7) and best-observed otherwise (DTLZ6, DTLZ7, WFG1, WFG9).
 
 ---
 
@@ -199,8 +247,8 @@ If you use this code, please cite:
 
 ```bibtex
 @article{Ndikuriyo2026RLEEMO,
-  title   = {A PPO-Guided Evolutionary Framework with Region-Based Diversity
-             and Local Search for Multi-Objective Global Optimization},
+  title   = {RLE-EMO: A Region-Based LHS-Guided Evolutionary Algorithm
+             for Multi-Objective Optimization},
   author  = {Ndikuriyo, Yves and Zhang, Yinggui and Fom, Dung Davou},
   journal = {Journal of Global Optimization},
   year    = {2026},
@@ -215,6 +263,12 @@ If you use this code, please cite:
 - **Yves Ndikuriyo** — School of Traffic and Transportation Engineering, Central South University
 - **Yinggui Zhang** — School of Traffic and Transportation Engineering, Central South University
 - **Dung Davou Fom** — School of Traffic and Transportation Engineering, Central South University
+
+---
+
+## Data and Code Availability
+
+The benchmark problems used in this study are available through the pymoo library at [https://pymoo.org/problems/index.html](https://pymoo.org/problems/index.html). The source code for RLE-EMO and all experimental data generated during this study are available in this public GitHub repository at [https://github.com/YvesNDIKURIYO-2022/RLE-EMO](https://github.com/YvesNDIKURIYO-2022/RLE-EMO).
 
 ---
 
