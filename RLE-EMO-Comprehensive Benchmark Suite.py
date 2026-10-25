@@ -1,29 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 r"""
-RLE-EMO: Comprehensive Benchmark Suite (v5.3)
-=============================================
+RLE-EMO: Comprehensive Benchmark Suite
+======================================
 
-Change log v5.2 -> v5.3
------------------------
-1. **Initialization is now LHS-guided, not PPO-guided.** The previous
-   version (v5.2) still used `PPOAgent` in the initialization step, which
-   contradicted the manuscript's Section 3.3, Table 3.3, Table 4.3, and
-   Algorithm 1. The `PPOAgent` and `PPOTrainer` classes have been removed
-   entirely. Initialization now draws an LHS subsample via
-   `scipy.stats.qmc.LatinHypercube`, exactly as the manuscript describes.
+Runs the RLE-EMO benchmark against NSGA-II, MOEA/D, and RVEA on the
+eleven instances from the ZDT, DTLZ, WFG, and DASCMOP suites, with
+30 independent runs per instance, and writes the results, statistics,
+and plots to the output directory.
 
-2. **No offline cost, no warm-start pool.** With the PPO trainer removed,
-   the initialization is fully deterministic given the run seed and there
-   is no amortized offline cost. This brings the code into agreement with
-   the manuscript's Section 3.5 and Section 4.4.
+Optionally runs the six-variant ablation study (``--ablation``) or
+both in one call (``--all``).
 
-3. All other components (region-based selection, dual reset triggers,
-   diversity archive, coordinate-descent local search, adaptive operator
-   rates, bounding-box filter, two-pass reference construction,
-   pymoo-native baselines, statistics) are unchanged from v5.2.
-
-Manuscript alignment (verified):
+Manuscript alignment:
     - Initialization:    LHS 30%, heuristic 30%, random 30%, opposite 10%
     - Budget rule:       N_pop = 40 + floor(n_var/5)
                          G_max = 100 for DTLZ, WFG; 80 for ZDT, DASCMOP
@@ -34,7 +23,11 @@ Manuscript alignment (verified):
     - Algorithm 1:       Phase I (adaptive), Phase II (LHS ensemble),
                          Phase III (adaptive NSGA-II + archive + local search)
 
-Outputs go to the manuscript folder by default; override with --output.
+Usage:
+    python rle_emo_benchmark.py
+    python rle_emo_benchmark.py --output ./results --runs 30
+    python rle_emo_benchmark.py --ablation
+    python rle_emo_benchmark.py --all
 """
 
 # ============================================================================
@@ -82,33 +75,14 @@ import time
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.projections
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-try:
-    matplotlib.projections.get_projection_class("3d")
-except (KeyError, ValueError):
-    matplotlib.projections.register_projection(Axes3D)
-
-
-def _safe_set_rcparam(key, value):
-    try:
-        if key in matplotlib.rcParams:
-            matplotlib.rcParams[key] = value
-    except Exception:
-        pass
-
-
-_safe_set_rcparam("axes3d.depthshade_minalpha", 0.3)
-_safe_set_rcparam("axes3d.depthshade", True)
-
 import matplotlib.pyplot as plt
 import numpy as np
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d projection)
 from scipy import stats
-from scipy.spatial import distance
 from scipy.stats import qmc  # LHS sampler
 
 from pymoo.algorithms.moo.nsga2 import NSGA2
@@ -136,15 +110,13 @@ BOUNDING_BOX_UPPER_FACTOR = 1.2
 BOUNDING_BOX_LOWER_MARGIN = 0.5
 BOUNDING_BOX_USE_REF_POINT_UPPER = True
 
+# Reference-front policy: "auto", "analytic", "best-observed", or "none".
+# Mutated by --reference-front in main().
 REFERENCE_FRONT_POLICY = "auto"
 
 DEGENERATE_THRESHOLD = 1e8
 
-DEFAULT_OUTPUT_DIR = (
-    r"D:\Container Transportation Routing Problems"
-    r"\Manuscript3-A Low-carbon based Robust Optimization under uncertainty"
-    r"\rle_emo_benchmark_results"
-)
+DEFAULT_OUTPUT_DIR = "./results"
 
 PALETTE = [
     "#1f77b4", "#2ca02c", "#9467bd", "#e377c2", "#bcbd22",
@@ -153,9 +125,10 @@ PALETTE = [
 
 
 # ============================================================================
-# MATPLOTLIB STYLE (Elsevier friendly)
+# MATPLOTLIB STYLE
 # ============================================================================
-def style_elsevier():
+def _set_plot_style():
+    """Serif, 300-dpi, print-friendly style for the generated figures."""
     matplotlib.rcParams.update({
         "font.family": "serif",
         "font.serif": ["Times New Roman", "DejaVu Serif", "serif"],
@@ -187,8 +160,7 @@ def style_elsevier():
     })
 
 
-style_elsevier()
-_safe_set_rcparam("axes3d.depthshade_minalpha", 0.3)
+_set_plot_style()
 
 
 # ============================================================================
@@ -325,7 +297,7 @@ def _build_bounding_box(reference_front, ref_point=None):
     return lower, upper, True
 
 
-def filter_solutions(F, reference_front, ref_point=None, rel_tol=None):
+def filter_solutions(F, reference_front, ref_point=None):
     if F is None or len(F) == 0:
         return np.zeros((0, 0))
     F = np.asarray(F, dtype=float)
@@ -448,21 +420,14 @@ def make_problem(problem_name: str, **kwargs) -> PymooProblemWrapper:
 
 
 # ============================================================================
-# RLE-EMO ALGORITHM (LHS-guided, no PPO)
+# RLE-EMO ALGORITHM
 # ============================================================================
 class RLEEMO:
     """
     RLE-EMO with LHS-guided ensemble initialization.
 
-    All attributes and behaviors match the manuscript:
-        - Phase I:   size-adaptive configuration
-        - Phase II:  LHS-guided ensemble initialization (30/30/30/10)
-        - Phase III: adaptive NSGA-II with region-based selection,
-                     dual reset triggers, diversity archive, and
-                     periodic coordinate-descent local search.
-
-    The `use_*` flags below allow the ablation study to switch each
-    component on or off; the default `full` variant activates all.
+    The ``use_*`` flags allow the ablation study to switch each component
+    on or off; the default ``full`` variant activates all of them.
     """
 
     def __init__(self, problem: PymooProblemWrapper,
@@ -501,7 +466,8 @@ class RLEEMO:
         self.population: List[List[float]] = []
         self.fitness: List[List[float]] = []
         self.diversity_archive: List[List[float]] = []
-        self.history = {"hypervolume": [], "diversity": [], "convergence": []}
+        self.history = {"hypervolume": [], "diversity": [],
+                        "convergence": [], "hypervolume_best": []}
         self._last_reset_gen = -10**9
 
     # ------------------------------------------------------------------
@@ -511,19 +477,22 @@ class RLEEMO:
         K = self.config.K_regions
         m = self.n_obj
         if m == 2:
-            w = np.column_stack([np.linspace(0, 1, K), np.linspace(1, 0, K)])
+            w = np.column_stack([np.linspace(0, 1, K),
+                                 np.linspace(1, 0, K)])
         elif m == 3:
             from itertools import combinations_with_replacement
             dirs, p = [], 3
             while len(dirs) < K:
                 dirs = [[c / p for c in combo]
-                        for combo in combinations_with_replacement(range(p + 1), m)
+                        for combo in combinations_with_replacement(
+                            range(p + 1), m)
                         if sum(combo) == p]
                 p += 1
             w = np.array(dirs[:K])
         else:
             w = self.rng.dirichlet(np.ones(m), K)
-        return w / np.maximum(np.linalg.norm(w, axis=1, keepdims=True), 1e-12)
+        return w / np.maximum(np.linalg.norm(w, axis=1, keepdims=True),
+                              1e-12)
 
     # ------------------------------------------------------------------
     # State computations
@@ -538,7 +507,8 @@ class RLEEMO:
         lo, hi = F.min(axis=0), F.max(axis=0)
         rng = np.where(hi - lo > 1e-12, hi - lo, 1.0)
         F_n = (F - lo) / rng
-        F_norm = F_n / np.maximum(np.linalg.norm(F_n, axis=1, keepdims=True), 1e-12)
+        F_norm = F_n / np.maximum(
+            np.linalg.norm(F_n, axis=1, keepdims=True), 1e-12)
         assoc = np.argmax(F_norm @ self.region_weights.T, axis=1)
         counts = np.bincount(assoc, minlength=self.config.K_regions)
         expected = len(pop) / self.config.K_regions
@@ -567,25 +537,18 @@ class RLEEMO:
         return max(0.5, min(0.95, p_c)), max(0.02, min(0.3, p_m))
 
     # ------------------------------------------------------------------
-    # Initialization: LHS-guided ensemble (matches manuscript Sec. 3.3)
+    # Initialization: LHS-guided ensemble (manuscript Sec. 3.3)
     # ------------------------------------------------------------------
     def _generate_lhs_solutions(self, n_samples: int) -> List[List[float]]:
-        """
-        Draw `n_samples` Latin hypercube points and scale them to the
-        problem's bounding box. Deterministic given self.rng's seed.
-        """
         if n_samples <= 0:
             return []
         sampler = qmc.LatinHypercube(d=self.n_var, seed=self.rng)
         unit = sampler.random(n=n_samples)
-        if hasattr(self.problem, "xl") and hasattr(self.problem, "xu"):
-            scaled = qmc.scale(unit, self.problem.xl, self.problem.xu)
-        else:
-            scaled = unit
+        scaled = qmc.scale(unit, self.problem.xl, self.problem.xu)
         return [row.tolist() for row in scaled]
 
     def _generate_heuristic_solution(self) -> List[float]:
-        """Midpoint of the bounding box (nearest-neighbor heuristic proxy)."""
+        """Midpoint of the bounding box."""
         return [float((self.problem.xl[i] + self.problem.xu[i]) / 2)
                 for i in range(self.n_var)]
 
@@ -610,7 +573,6 @@ class RLEEMO:
         if self.use_lhs_control:
             pop += self._generate_lhs_solutions(n_lhs)
         else:
-            # Ablation: replace the LHS subsample with uniform random.
             pop += [self._generate_random_solution() for _ in range(n_lhs)]
         pop += [self._generate_heuristic_solution() for _ in range(n_heur)]
         pop += [self._generate_random_solution() for _ in range(n_rand)]
@@ -689,7 +651,8 @@ class RLEEMO:
         lo, hi = F.min(axis=0), F.max(axis=0)
         rng = np.where(hi - lo > 1e-12, hi - lo, 1.0)
         F_n = (F - lo) / rng
-        F_norm = F_n / np.maximum(np.linalg.norm(F_n, axis=1, keepdims=True), 1e-12)
+        F_norm = F_n / np.maximum(
+            np.linalg.norm(F_n, axis=1, keepdims=True), 1e-12)
         sim = F_norm @ self.region_weights.T
         assoc = np.argmax(sim, axis=1)
         dist_to_w = 1.0 - sim[np.arange(len(front)), assoc]
@@ -817,8 +780,6 @@ class RLEEMO:
                 :max(1, int(self.config.archive_size_ratio
                             * self.population_size))]
 
-        best_so_far = 0.0
-
         for gen in range(self.max_generations):
             xi_div = self._compute_diversity_state(self.population)
             xi_conv = self._compute_convergence_state(self.population)
@@ -831,9 +792,7 @@ class RLEEMO:
                 child = self._poly_mut(child, p_m)
                 offspring.append(child)
 
-            off_fit = [self.evaluate(s) for s in offspring]
             combined = self.population + offspring
-            combined_fit = self.fitness + off_fit
 
             fronts = self._fast_non_dominated_sort(combined)
             new_pop, new_fit = [], []
@@ -877,19 +836,18 @@ class RLEEMO:
 
             hv_val = _compute_internal_hv(np.array(self.fitness), self.n_obj)
             self.history["hypervolume"].append(hv_val)
-            best_so_far = max(best_so_far, hv_val)
-            self.history.setdefault("hypervolume_best", []).append(best_so_far)
+            self.history["hypervolume_best"].append(
+                max(self.history["hypervolume_best"][-1]
+                    if self.history["hypervolume_best"] else 0.0,
+                    hv_val))
             self.history["diversity"].append(xi_div)
             self.history["convergence"].append(xi_conv)
 
-        if self.use_archive_return:
-            combined = self.population + self.diversity_archive
-        else:
-            combined = self.population
+        combined = (self.population + self.diversity_archive
+                    if self.use_archive_return else self.population)
         fit_arr = np.array([self.evaluate(s) for s in combined], dtype=float)
         if len(fit_arr) == 0:
-            return {"population": [], "fitness": [],
-                    "history": self.history, "hypervolume": 0.0}
+            return {"population": [], "fitness": [], "history": self.history}
         fit_arr = np.nan_to_num(fit_arr, nan=1e10,
                                 posinf=1e10, neginf=-1e10)
         try:
@@ -911,7 +869,7 @@ class RLEEMO:
                 uniq_fit.append(f)
 
         return {"population": uniq_pop, "fitness": uniq_fit,
-                "history": self.history, "hypervolume": 0.0}
+                "history": self.history}
 
 
 def _compute_internal_hv(fitness_array, n_obj):
@@ -995,8 +953,7 @@ class PymooBaseline:
         X = (np.asarray(res.X, dtype=float)
              if res.X is not None else np.zeros((0, self.n_var)))
         return {"population": X.tolist(), "fitness": F.tolist(),
-                "history": {"hypervolume": [0.0] * self.max_generations},
-                "hypervolume": 0.0}
+                "history": {"hypervolume": [0.0] * self.max_generations}}
 
 
 # ============================================================================
@@ -1088,7 +1045,7 @@ def build_reference_fronts(problem, raw_fronts_by_alg, policy):
 
 def _best_observed_front(raw_fronts_by_alg):
     all_fronts = []
-    for alg_name, fronts in raw_fronts_by_alg.items():
+    for _, fronts in raw_fronts_by_alg.items():
         if not fronts:
             continue
         best = _select_best_front(fronts)
@@ -1247,8 +1204,7 @@ class ExperimentRunner:
                 except Exception as e:
                     print(f"    [warn] {alg_name} run {run} failed: {e}")
                     result = {"population": [], "fitness": [],
-                              "history": {"hypervolume": []},
-                              "hypervolume": 0.0}
+                              "history": {"hypervolume": []}}
                 elapsed = time.time() - t0
                 alg_results.append(result)
                 alg_times.append(elapsed)
@@ -2337,14 +2293,14 @@ def main():
     global REFERENCE_FRONT_POLICY
 
     parser = argparse.ArgumentParser(
-        description="RLE-EMO benchmark suite and ablation study (v5.3).")
+        description="RLE-EMO benchmark suite and ablation study.")
     parser.add_argument("--ablation", action="store_true",
                         help="Run only the ablation study.")
     parser.add_argument("--all", action="store_true",
                         help="Run benchmark + ablation in one call.")
     parser.add_argument("--runs", type=int, default=30)
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT_DIR,
-                        help="Output directory. Default: manuscript folder.")
+                        help="Output directory. Default: ./results")
     parser.add_argument("--problems", type=str, default=None)
     parser.add_argument("--algorithms", type=str, default=None)
     parser.add_argument("--reference-front", type=str, default="auto",
@@ -2355,7 +2311,7 @@ def main():
     REFERENCE_FRONT_POLICY = args.reference_front
 
     print("=" * 90)
-    print("RLE-EMO: Comprehensive Benchmark Suite (v5.3, LHS-guided)")
+    print("RLE-EMO: Comprehensive Benchmark Suite")
     print("=" * 90)
     print(f"Output directory: {args.output}")
     print("=" * 90)
