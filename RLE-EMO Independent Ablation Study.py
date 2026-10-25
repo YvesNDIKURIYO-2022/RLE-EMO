@@ -4,14 +4,11 @@ r"""
 RLE-EMO: Standalone Ablation Study
 ==================================
 
-This script runs ONLY the six-variant ablation study of the RLE-EMO
-algorithm, using the LHS-guided initialization and all other components
-exactly as defined in v5.3 of the benchmark suite.
+Runs ONLY the six-variant ablation study of the RLE-EMO algorithm.
+Does not run NSGA-II / MOEA/D / RVEA, does not produce Pareto-front or
+convergence plots, and does not write the benchmark summary tables.
 
-It is self-contained: it does not run NSGA-II / MOEA/D / RVEA, it does
-not produce Pareto-front or convergence plots, and it does not write
-the benchmark summary tables. It produces only:
-
+Outputs (in the output directory):
     ablation_summary.txt    problem x variant table with HV / IGD / Card
     ablation_heatmap.png    per-problem normalized mean-HV heatmap
     ablation_heatmap.pdf    vector version of the same
@@ -30,19 +27,22 @@ Variants
 
 Reference front policy
 ----------------------
-For each instance, the reference front is built as in v5.3:
+For each instance, the reference front is built from the six variants:
     - analytic Pareto front, if reliable;
     - otherwise the non-dominated union of the best-observed fronts of
       all six variants.
 The same reference front is used for every variant on a given instance,
-so the comparison is fair.
+so the comparison is fair. Note that this differs from the benchmark
+script, which builds the reference front from the four competing
+algorithms; absolute HV values should not be compared across the two
+tables.
 
 Usage
 -----
     python rle_emo_ablation.py                 # 30 runs, 11 problems
     python rle_emo_ablation.py --runs 5
     python rle_emo_ablation.py --problems zdt1,dtlz6
-    python rle_emo_ablation.py --output "D:\path\to\out"
+    python rle_emo_ablation.py --output ./ablation_output
 """
 
 # ============================================================================
@@ -81,16 +81,9 @@ from typing import Any, Dict, List, Optional
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.projections
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-try:
-    matplotlib.projections.get_projection_class("3d")
-except (KeyError, ValueError):
-    matplotlib.projections.register_projection(Axes3D)
-
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy import stats
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d projection)
 from scipy.stats import qmc
 
 from pymoo.indicators.hv import HV
@@ -103,7 +96,7 @@ warnings.filterwarnings("ignore")
 
 
 # ============================================================================
-# GLOBAL CONSTANTS (kept identical to v5.3)
+# GLOBAL CONSTANTS
 # ============================================================================
 UNRELIABLE_ANALYTIC_FRONT = {"dtlz6", "dtlz7", "wfg1", "wfg9"}
 
@@ -111,15 +104,9 @@ BOUNDING_BOX_UPPER_FACTOR = 1.2
 BOUNDING_BOX_LOWER_MARGIN = 0.5
 BOUNDING_BOX_USE_REF_POINT_UPPER = True
 
-REFERENCE_FRONT_POLICY = "auto"
-
 DEGENERATE_THRESHOLD = 1e8
 
-DEFAULT_OUTPUT_DIR = (
-    r"D:\Container Transportation Routing Problems"
-    r"\Manuscript3-A Low-carbon based Robust Optimization under uncertainty"
-    r"\rle_emo_benchmark_results"
-)
+DEFAULT_OUTPUT_DIR = "./ablation_output"
 
 PALETTE = [
     "#1f77b4", "#2ca02c", "#9467bd", "#e377c2", "#bcbd22",
@@ -130,7 +117,8 @@ PALETTE = [
 # ============================================================================
 # MATPLOTLIB STYLE
 # ============================================================================
-def style_elsevier():
+def _set_plot_style():
+    """Serif, 300-dpi, print-friendly style for the generated figures."""
     matplotlib.rcParams.update({
         "font.family": "serif",
         "font.serif": ["Times New Roman", "DejaVu Serif", "serif"],
@@ -162,7 +150,7 @@ def style_elsevier():
     })
 
 
-style_elsevier()
+_set_plot_style()
 
 
 # ============================================================================
@@ -405,9 +393,16 @@ def make_problem(problem_name: str, **kwargs) -> PymooProblemWrapper:
 
 
 # ============================================================================
-# RLE-EMO ALGORITHM (identical to v5.3)
+# RLE-EMO ALGORITHM
 # ============================================================================
 class RLEEMO:
+    """
+    RLE-EMO with LHS-guided ensemble initialization.
+
+    The ``use_*`` flags select which components are active; the
+    ``full`` variant of the ablation study enables all of them.
+    """
+
     def __init__(self, problem: PymooProblemWrapper,
                  config: RLEEMOConfig, suite: str = "ZDT",
                  max_generations: Optional[int] = None,
@@ -512,13 +507,11 @@ class RLEEMO:
             return []
         sampler = qmc.LatinHypercube(d=self.n_var, seed=self.rng)
         unit = sampler.random(n=n_samples)
-        if hasattr(self.problem, "xl") and hasattr(self.problem, "xu"):
-            scaled = qmc.scale(unit, self.problem.xl, self.problem.xu)
-        else:
-            scaled = unit
+        scaled = qmc.scale(unit, self.problem.xl, self.problem.xu)
         return [row.tolist() for row in scaled]
 
     def _generate_heuristic_solution(self) -> List[float]:
+        """Midpoint of the bounding box."""
         return [float((self.problem.xl[i] + self.problem.xu[i]) / 2)
                 for i in range(self.n_var)]
 
@@ -757,9 +750,7 @@ class RLEEMO:
                 child = self._poly_mut(child, p_m)
                 offspring.append(child)
 
-            off_fit = [self.evaluate(s) for s in offspring]
             combined = self.population + offspring
-            combined_fit = self.fitness + off_fit
 
             fronts = self._fast_non_dominated_sort(combined)
             new_pop, new_fit = [], []
@@ -803,10 +794,8 @@ class RLEEMO:
                     self.population[idx] = improved
                     self.fitness[idx] = self.evaluate(improved)
 
-        if self.use_archive_return:
-            combined = self.population + self.diversity_archive
-        else:
-            combined = self.population
+        combined = (self.population + self.diversity_archive
+                    if self.use_archive_return else self.population)
         fit_arr = np.array([self.evaluate(s) for s in combined],
                            dtype=float)
         if len(fit_arr) == 0:
@@ -924,7 +913,7 @@ def build_reference_fronts(problem, raw_fronts_by_variant, policy):
 
 def _best_observed_front(raw_fronts_by_variant):
     all_fronts = []
-    for variant, fronts in raw_fronts_by_variant.items():
+    for _, fronts in raw_fronts_by_variant.items():
         if not fronts:
             continue
         best = _select_best_front(fronts)
@@ -1194,7 +1183,7 @@ def main():
                         help="Number of independent runs per "
                              "(problem, variant) pair.")
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT_DIR,
-                        help="Output directory. Default: manuscript folder.")
+                        help="Output directory. Default: ./ablation_output")
     parser.add_argument("--problems", type=str, default=None,
                         help="Comma-separated subset of problem names.")
     parser.add_argument("--reference-front", type=str, default="auto",
